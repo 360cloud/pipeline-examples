@@ -1,0 +1,113 @@
+pipeline {
+  agent {
+    node {
+      label 'linux-slave'
+    }
+  }
+
+  stages {
+    stage('Prep') {
+      steps {
+        sh 'echo "Jenkins build is running on host `hostname` and working directory is `pwd`" '
+        sh 'docker image prune -a -f --filter "until=2h"'
+        //git tag --list 'Rel-*' | xargs -n 1 -I % echo "git tag -d %; git push --delete origin %" --tags | sh
+        sh 'env'
+      }
+    }
+
+    stage('Compile') {
+      steps {
+	sh """
+        cd ${WORKSPACE}
+	make deps
+	make build
+	"""
+      }
+    }
+
+    stage('Static analysis') {
+      steps {
+		  sh 'echo "static analysis"'
+        sh 'cd ${WORKSPACE}; export GOPATH=${WORKSPACE}; cd src/signal; go get github.com/axw/gocov/...;go get github.com/AlekSi/gocov-xml; go test -coverprofile=coverage.out; $GOPATH/bin/gocov convert cover.out | $GOPATH/bin/gocov-xml > coverage.xml; /home/ec2-user/sonar-scanner-3.1.0.1141-linux/bin/sonar-scanner -Dsonar.projectKey=test-app-go -Dsonar.sources=. -Dsonar.coverage.reportPath=coverage.xml -Dsonar.host.url=http://${SONAR_HOST}  -Dsonar.login=665derec9e1cca628bc18a3c0a8e2b273d50e'
+      }
+    }
+
+    stage('Docker build') {
+      steps {
+        sh 'cd ${WORKSPACE}; export GOPATH=${WORKSPACE}; make docker-build tag=${VERSION}'
+      }
+
+    }
+
+    stage('Docker publish') {
+      steps {
+        sh 'cd ${WORKSPACE}; export GOPATH=${WORKSPACE}; make docker-push tag=${VERSION}'
+      }
+    }
+
+  stage ('Postbuild Step - Tag Repository') {
+		when {
+                expression { env.GIT_BRANCH=="origin/master" }
+            }     
+		steps {
+        sh """ #!/bin/sh
+        echo "Performing Postbuild actions - Repository Tagging"
+        git tag Rel-${env.RELEASE}-${env.BUILD_NUMBER}
+        git push --tags
+        env
+        """ 
+		      }    
+  }
+  stage('Deploy to Kubernetes Dev') {
+      when {
+                expression { env.GIT_BRANCH=="origin/develop" }
+            }
+      agent {
+          node  {
+              label 'kube-dev'
+                }
+            }
+      steps {
+        sh """#!/bin/sh
+        sed -i.bak "s/VER/${VERSION}/g" ./helm/${APP_NAME}/values.yaml
+        sed -i.bak "s/APP/${APP_NAME}/g" ./helm/${APP_NAME}/values.yaml
+        chmod a+x ./helm/helm-init.sh
+        ./helm/helm-init.sh
+        helm upgrade --install --namespace default $APP_NAME ./helm/${APP_NAME} --set image.tag=$VERSION
+        """
+      }
+  }
+    stage('Deploy to Kubernetes') {
+      when {
+                expression { env.GIT_BRANCH=="origin/master" }
+           }
+      steps {
+        sh """#!/bin/sh
+        sed -i.bak "s/VER/${VERSION}/g" ./helm/${APP_NAME}/values.yaml
+        sed -i.bak "s/APP/${APP_NAME}/g" ./helm/${APP_NAME}/values.yaml
+        chmod a+x ./helm/helm-init.sh
+        ./helm/helm-init.sh
+	helm upgrade --install --namespace default $APP_NAME ./helm/${APP_NAME} --set image.tag=$VERSION
+	helm get $APP_NAME | istioctl kube-inject -f - | kubectl apply -f -
+	helm package ./helm/${APP_NAME}
+	curl -u${ID}:${ART_PASSWD} -T ${APP_NAME}-${VERSION}.tgz "${ART_URL}/helm/${APP_NAME}-${VERSION}.tgz"
+        """
+      }
+    }
+
+    stage('Notification') {
+      steps {
+        slackSend "Build  ${env.JOB_NAME} ${env.BUILD_NUMBER} Passed "
+
+        //emailext(subject: 'Jenkins Build Started $BUILD_TAG', body: 'Jenkins Build Started $BUILD_TAG', to: '1jan13nam@gmail.com')
+      }
+    }
+  }
+
+  environment {
+    VERSION = '0.1.0'
+    APP_NAME = 'test-app'
+    DCR_REG = '${ARTI_URL}/snapshot'
+    RELEASE = '1.0.0'
+  }
+}

@@ -1,0 +1,101 @@
+pipeline {
+  agent {
+    node {
+      label 'linux-slave'
+    }
+  }
+
+environment {
+    VERSION = '0.5.0'
+    APP_NAME = 'test-2'
+    DCR_REG = '${ARTI_URL}/snapshot'
+    RELEASE = '1.0.0'
+  }
+
+  stages {
+    stage('Prep') {
+      steps {
+        sh """#!/bin/sh
+        echo "Jenkins build is running on host `hostname` and working directory is `pwd`"
+        docker image prune -a -f --filter "until=2h"
+        env
+        sed -i.bak "s/VER/${VERSION}/g" ./helm/${APP_NAME}/values.yaml
+        sed -i.bak "s/APP/${APP_NAME}/g" ./helm/${APP_NAME}/values.yaml
+        sed -i.bak "s/VER/${VERSION}/g" ./helm/${APP_NAME}/Chart.yaml
+        sed -i.bak "s/APP/${APP_NAME}/g" ./helm/${APP_NAME}/Chart.yaml
+        """
+      }
+    }
+
+    stage('Compile') {
+      steps {
+        sh 'cd ${WORKSPACE} && mvn -Dmaven.test.skip=true -f pom.xml clean package'
+      }
+    }
+
+    stage('Static analysis') {
+      steps {
+        sh 'cd ${WORKSPACE}; mvn sonar:sonar \
+              -Dsonar.host.url=${SONAR_HOST} \
+              -Dsonar.login=${SONAR_TOKEN}'
+      }
+    }
+
+    stage('Docker build') {
+      steps {
+         sh 'mvn -f pom.xml -DdockerImageTags=${VERSION} docker:build'
+      }
+    }
+
+    stage('Docker publish') {
+      steps {
+        sh 'docker push ${DCR_REG}/${APP_NAME}:${VERSION}'
+      }
+    }
+
+    stage('Deploy to Dev') {
+      when {
+                expression { env.GIT_BRANCH=="origin/develop" }
+            }
+      agent {
+          node  {
+              label 'kube-dev'
+                }
+            }
+      steps {
+        sh """#!/bin/sh
+        helm upgrade --install --namespace default $APP_NAME ./helm/${APP_NAME} --set image.tag=$VERSION
+        """
+      }
+    }
+    stage('Deploy to lab') {
+      when {
+                expression { env.GIT_BRANCH=="origin/master" }
+            }
+      steps {
+        sh """#!/bin/sh
+        helm upgrade --install --force --namespace default $APP_NAME ./helm/${APP_NAME} --set image.tag=$VERSION
+        helm package ./helm/${APP_NAME}
+        curl -ujenkins:${JKS_TKN} -T ${APP_NAME}-${VERSION}.tgz "${ARTI_URL}/${APP_NAME}-${VERSION}.tgz"
+        """
+      }
+    }
+
+  }
+   post {
+        success {
+            slackSend "${env.JOB_NAME} build #${env.BUILD_NUMBER} successful"
+            sh """ #!/bin/sh
+            echo "Performing Postbuild actions - Repository Tagging"
+            git tag Rel-${env.RELEASE}-${env.BUILD_NUMBER}
+            git push --tags
+            env
+            """
+                }
+        failure {
+        slackSend "${env.JOB_NAME} build #${env.BUILD_NUMBER} failed , Please investigate"
+        }
+    }
+
+
+}
