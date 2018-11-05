@@ -1,0 +1,45 @@
+pipeline{
+  agent {label 'docker'}
+  environment {
+     appName="{env.JOB_NAME}"
+     project="tng"
+     repourl="registry.rancher.test.com"
+     repo='capture_tc_nextgen'
+    email ='vj.k.sharma@gmail.com'
+    }
+    stages{
+    stage(Checkout from Bitbucket){
+    steps {
+    //checkoutrepo
+    checkout ([$class: 'GitSCM', branches: [[name: "*/master"]], useRemoteConfigs: [[crediantialid: #######' url: http://*.git]]])
+
+    }
+
+    stage ('Build Go App') {
+    steps {
+    sh "curl -k ${ARTI_URL}/test.sh -o test.sh"
+    sh "ls -la"
+    sh "chmod +x test.sh"
+    sh "./test.sh"
+    }
+
+    stage('Upload to Rancher-DockerRepo'){
+    steps {
+    withCredentials([usernamePassword(crediantialid:'')]) {
+    sh "curl -k ${ARTI_URL}/deploy.sh -o deploy.sh"
+    sh "ls -la"
+    sh "chmod +x test.sh"
+    sh "./deploy.sh"
+    }
+    }
+    post {
+    always{
+    emailext attachLog: true, body: '''$PROJECT_NAME - Build # $BUILD_NUMBER - $BUILD_STATUS:Check console , to: "${email} "
+    }
+    }
+    }
+    }
+
+
+    }
+    }
