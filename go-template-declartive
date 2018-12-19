@@ -1,0 +1,111 @@
+gotngmain(name: 'test-app', healthchk: 'health')
+
+# cat Dockerfile.ci
+FROM golang:alpine
+
+# Setup Build Dependency
+RUN apk add --update --no-cache alpine-sdk bash openssl-dev musl-dev zlib-dev
+WORKDIR /root
+RUN git clone https://github.com/edenhill/librdkafka.git
+WORKDIR /root/librdkafka
+RUN /root/librdkafka/configure && \
+    make && \
+    make install;
+#Setup
+
+# Application Build
+WORKDIR /go
+RUN mkdir -p /go/pkg
+RUN mkdir -p /go/bin
+RUN go get -u github.com/golang/lint/golint
+RUN go get github.com/cloudflare/golibs/lrucache
+RUN go get github.com/gorilla/mux
+RUN go get github.com/rs/cors
+RUN go get github.com/goinggo/work
+RUN go get -u github.com/confluentinc/confluent-kafka-go/kafka
+RUN go get -u github.com/sirupsen/logrus
+RUN go get gopkg.in/mgo.v2/bson
+RUN go get -u github.com/onsi/ginkgo/ginkgo
+RUN go get -u github.com/onsi/gomega/...
+COPY . /go/src/test-app/
+WORKDIR /go/src/test-app/cmd/svr
+
+# cat jenkins/vars/healthchk.groovy
+
+def call(def appname, def ep) {
+    retry (3) {
+        sleep 15
+        httpRequest url:"https://${appname}.daas-solutions.rancher.us/${ep}", validResponseCodes: '200'
+    }
+}
+
+# cat jenkins/vars/gotngmain.groovy
+def call(Map pipelineParams) {
+pipeline {
+    agent {
+      dockerfile {
+        filename 'Dockerfile.ci'
+        args '-u 0:0'
+       }
+          }
+
+    options {
+        newContainerPerStage()
+    }
+    triggers { pollSCM('H */45 * * 1-5') }
+
+    stages {
+        stage('Initialize') {
+            steps {
+                echo "Current GO Configurations - Setting up Configurations "
+                sh 'go env; go version'
+                sh """
+                   cd /go/src/${pipelineParams.name}/ && go get -v ./...
+                   cd /go/src/${pipelineParams.name} && go build ./...
+                   """
+            }
+        }
+        stage('Unit-Test') {
+          steps {
+             sh """
+                 #cd /go/src/${pipelineParams.name} && go vet -v ./... > ${workspace}/go-${pipelineParams.name}.out
+                 #cd /go/src/${pipelineParams.name}/pkg && go tool vet -v . >> ${workspace}/gobld-vet-${pipelineParams.name}.out
+                 echo "Go linting"
+                 cd /go/src/${pipelineParams.name} && golint ./... | tee ${workspace}/gobld-lint-${pipelineParams.name}.out
+                 """
+                 archiveArtifacts artifacts: 'gobld-lint-*.out', fingerprint: true
+               sh """
+                 echo "Go Testing"
+                 cd /go/src/${pipelineParams.name} && go test -v  ./... | tee ${workspace}/gobld-test-${pipelineParams.name}.out
+                 cd /go/src/${pipelineParams.name} && go test -cover ./... | tee ${workspace}/gobld-test-coverage-${pipelineParams.name}.out
+                """
+                archiveArtifacts artifacts: 'gobld-test-*.out', fingerprint: true
+          }
+      }
+      stage ('Deploy-DevCloud') {
+            agent { node { label 'dev-cloud' } }
+            when  { branch "dev" }
+
+            steps {
+                   echo "Testing Deployment Node ..."
+                   sh "export PATH=/usr/local/bin:$PATH ; kubectl get deployment -n tc-nextgen ${pipelineParams.name} -o wide"
+                   echo "Deploying ${pipelineParams.name} to Dev Cloud ... "
+                   sh "export PATH=/usr/local/bin:$PATH ; ${WORKSPACE}/deploy-cloud.sh"
+
+             }
+
+     }
+
+     stage ('Health-Check') {
+            agent { node { label 'dev-cloud' } }
+            when  { branch "dev" }
+
+            steps {
+              sh ' echo "waiting for Services to come up"; sleep 10 '
+              sh "export PATH=/usr/local/bin:$PATH ; helm status ${pipelineParams.name} --tiller-namespace casenet"
+              healthchk (pipelineParams.name, pipelineParams.healthchk)
+            }
+     }
+    }
+  }
+}
