@@ -26,4 +26,4 @@ We want them!
 * [Pipeline scripts collection of the Docker team](https://github.com/docker/jenkins-pipeline-scripts)
 * [Pipeline scripts collection of the Fabric8 team](https://github.com/fabric8io/jenkins-pipeline-library)
 * [Pipeline scripts collection of the Funkwerk](https://github.com/funkwerk/jenkins-workflow)
-* [Declaritive pipeline] (https://jenkins.io/blog/2017/02/15/declarative-notifications/)
+* [Declaritive pipeline-notification](https://jenkins.io/blog/2017/02/15/declarative-notifications/)
